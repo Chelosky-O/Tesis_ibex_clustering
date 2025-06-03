@@ -31,6 +31,9 @@ struct ClusteringParams {
     double dynamic_eps_fallback = 0.1; // Eps por defecto si hay muy pocos puntos para estimar
 
 	int kmedoids_max_iters = 50;
+	
+	double max_hull_ydiam_factor = 0.5; // Ejemplo de valor por defecto, AJÚSTALO
+    double max_hull_ydiam_increase_factor = 2.0; // Ejemplo de valor por defecto, AJÚSTALO
 
 
 };
