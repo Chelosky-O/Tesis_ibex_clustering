@@ -24,6 +24,16 @@ using namespace std;
 #include <vector>
 #include <random>
 #include <limits>
+
+
+// NORMALIZACION
+
+static std::vector<double> inv_range;        // 1/diámetro por dimensión
+static ibex::IntervalVector root_box_norm;   // copia de la caja raíz
+
+// FIN NORMALIZACION
+
+
 // Representa el centro de cada caja (dim = n+1)
 using Point = std::vector<double>;
 // Resultado de k-means: etiqueta por punto y nº de clústeres
@@ -197,65 +207,51 @@ static DbscanClusterResult dbscan(const std::vector<Point> &data, double eps, in
 	}
 	return result;
 }
-// --- Fin del Código DBSCAN ---    
+// --- Fin del Código DBSCAN ---    // Nueva función para estimar un eps dinámico
 
+static double estimate_dynamic_eps(const std::vector<Point>& data,
+                                   int   min_pts,
+                                   double alpha = 0.7,
+                                   double fallback = 0.1) {
+    const size_t N = data.size();
+    if (N < static_cast<size_t>(min_pts) || N < 20)   // muestra demasiado pequeña
+        return fallback;
 
-// Nueva función para estimar un eps dinámico
-static double estimate_dynamic_eps(const std::vector<Point> &data,
-								   int min_pts_for_context,		// Para asegurar que hay suficientes puntos para una estadística
-								   double fraction_of_avg_dist, // Qué fracción de la distancia promedio usar
-								   double default_eps_if_too_few_points = 0.1)
-{ // Fallback
-	size_t n_points = data.size();
-	// Si hay muy pocos puntos para una estimación robusta, o para satisfacer min_pts,
-	// es mejor usar un eps por defecto o no intentar el clustering.
-	if (n_points < 2 || n_points < (size_t)min_pts_for_context)
-	{
-		return default_eps_if_too_few_points;
-	}
-	int dim = 0;
-	if (n_points > 0)
-	{ // Asegurar que data no está vacío antes de acceder a data[0]
-		dim = data[0].size();
-	}
-	if (dim == 0)
-		return default_eps_if_too_few_points; // Puntos sin dimensión
-	Point mean_point(dim, 0.0);
-	// 1. Calcular el centroide (punto promedio) de todos los 'centers'
-	for (const auto &p : data)
-	{
-		for (int d = 0; d < dim; ++d)
-		{
-			mean_point[d] += p[d];
-		}
-	}
-	for (int d = 0; d < dim; ++d)
-	{
-		mean_point[d] /= n_points;
-	}
-	// 2. Calcular la distancia promedio de todos los puntos a este centroide
-	double total_distance_to_mean = 0.0;
-	for (const auto &p : data)
-	{
-		total_distance_to_mean += calculate_euclidean_distance_for_dbscan(p, mean_point); // Tu función de distancia
-	}
-	double avg_distance_to_mean = (n_points > 0) ? (total_distance_to_mean / n_points) : 0.0;
-	// 3. Establecer eps como una fracción de esta distancia promedio
-	// 'fraction_of_avg_dist' es un nuevo parámetro que podrías necesitar ajustar (ej. 0.1 a 0.5)
-	double dynamic_eps_candidate = avg_distance_to_mean * fraction_of_avg_dist;
-	// Asegurar que eps no sea cero si hay dispersión, o darle un valor mínimo muy pequeño
-	if (dynamic_eps_candidate == 0.0)
-	{
-		if (avg_distance_to_mean > 1e-9)
-		{														// Si había algo de dispersión pero el cálculo dio 0
-			dynamic_eps_candidate = avg_distance_to_mean * 0.1; // Una fracción pequeña
-		}
-		else
-		{								  // Todos los puntos son idénticos o están en el centroide
-			dynamic_eps_candidate = 1e-3; // Un valor pequeño por defecto para evitar eps=0
-		}
-	}
-	return dynamic_eps_candidate;
+    /* ── 1) matriz de distancias (bruto O(N²)) ───────────────────────── */
+    std::vector<double> kdist(N, 0.0);                // distancia al k-ésimo vecino
+    for (size_t i = 0; i < N; ++i) {
+        // recopilamos las N-1 distancias a otros puntos
+        std::vector<double> tmp;  tmp.reserve(N-1);
+        for (size_t j = 0; j < N; ++j)
+            if (i != j) {
+                double d = 0.0;
+                for (size_t d0 = 0; d0 < data[i].size(); ++d0) {
+                    double diff = data[i][d0] - data[j][d0];
+                    d += diff * diff;
+                }
+                tmp.push_back(std::sqrt(d));
+            }
+        std::nth_element(tmp.begin(), tmp.begin()+min_pts-1, tmp.end());
+        kdist[i] = tmp[min_pts-1];                    // k-ésima distancia
+    }
+    std::sort(kdist.begin(), kdist.end());            // curva k-distance
+
+    /* ── 2) normalizar y aplicar Kneedle ─────────────────────────────── */
+    const double d_max = kdist.back();
+    double max_g = -1.0;  size_t idx_knee = kdist.size()-1;
+    for (size_t i = 0; i < kdist.size(); ++i) {
+        double x = static_cast<double>(i) / (kdist.size()-1);   // [0,1]
+        double y = kdist[i] / d_max;                            // [0,1]
+        double g = y - x;                                       // Satopää 2011
+        if (g > max_g) { max_g = g; idx_knee = i; }
+    }
+    double eps_kneedle = kdist[idx_knee];
+
+    /* ── 3) suavizado robusto (opcional) ─────────────────────────────── */
+    double eps_mediana = kdist[kdist.size()/2];
+    double eps_final   = alpha * eps_kneedle + (1.0 - alpha) * eps_mediana;
+
+    return std::max(eps_final, 1e-9);                 // evita ε = 0
 }
 
 
@@ -491,11 +487,14 @@ namespace ibex
 
 		clustering_params.choice = ClusteringParams::Algorithm::DBSCAN;
 
-		restart_threshold = 1000;
-		node_threshold = 100000;
+		restart_threshold = 500;
+		node_threshold = 50000;
+		stagnation_counter = 0;
+
+		clustering_params.hull_volume_threshold_fraction = 3; // 10 para tener maximo de 10 veces mas la caja inicial
+
 
 		// KMEANS
-		stagnation_counter = 0;
 		clustering_params.k = 2000; // Tu valor anterior para k-means
 
 		// KMEDOIDS
@@ -505,13 +504,11 @@ namespace ibex
 
 		// DBSCAN
 		clustering_params.eps = 0.1;  // VALOR DE EJEMPLO - MUY SENSIBLE A TUS DATOS
-		clustering_params.minPts = 2; // clustering_params.minPts = this->n + 1; // VALOR DE EJEMPLO (ej. 2*dimensión o un valor fijo pequeño)
+		clustering_params.minPts = this->n + 1; // clustering_params.minPts = this->n + 1; // VALOR DE EJEMPLO (ej. 2*dimensión o un valor fijo pequeño)
 
 		// eps dinamico
-		clustering_params.use_dynamic_eps = true;	  // ¡Actívalo para probar!
-		clustering_params.dynamic_eps_fraction = 0.09; // Fracción a probar (0.1 a 0.5 es un rango inicial)
-		clustering_params.dynamic_eps_fallback = 0.1; // Fallback para eps si hay pocos puntos
-
+		clustering_params.use_dynamic_eps = true;	  // 
+		clustering_params.kneedle_alpha = 0.1; // Suavizado de Kneedle (0 < α ≤ 1)
 
 		if (enable_statistics)
 		{
@@ -756,6 +753,8 @@ namespace ibex
 	}
 	Optimizer::Status Optimizer::optimize(const IntervalVector &init_box, double obj_init_bound)
 	{
+
+		restart_stats.reset();
 		/*
 		// **NUEVO**: Mostrar información y volumen de la caja inicial (espacio de decisión)
 		if (trace > 0 && !init_box.is_empty() && init_box.size() == this->n) {
@@ -790,6 +789,16 @@ namespace ibex
 		loup = obj_init_bound;
 		// Just to initialize the "loup" for the buffer
 		// TODO: replace with a set_loup function
+
+		/* -------- Normalización: cachear la caja inicial -------------- */
+		root_box_norm = init_box;            // copia (dim = n)
+		inv_range.resize(n+1);               // n+1 porque después manejas espacios extendidos
+		for (int j = 0; j < n; ++j)
+		    inv_range[j] = 1.0 / root_box_norm[j].diam();   // diámetro > 0 por hipótesis
+		// la coordenada goal_var (y) no se normaliza porque no forma parte de los centros
+		/* -------------------------------------------------------------- */
+
+
 		buffer.contract(loup);
 		uplo = NEG_INFINITY;
 		uplo_of_epsboxes = POS_INFINITY;
@@ -941,8 +950,8 @@ namespace ibex
 
 						// reset counters
 
-						restart_threshold += (restart_threshold * 2);
-						node_threshold += node_threshold * 2;
+						restart_threshold += (restart_threshold);
+						node_threshold += node_threshold;
 						continue; // volvemos a la cabecera del while con nuevas cajas
 					}
 					// ───────────────────────────────────────────────────────────────────────
@@ -975,6 +984,29 @@ namespace ibex
 				status = UNREACHED_PREC;
 			else
 				status = SUCCESS;
+
+
+			//STATS NUEVAS
+			if (trace >= 0) {
+        		cout << endl;
+        		cout << "------------------------------------------" << endl;
+        		cout << " RESUMEN DE ESTADISTICAS DE CLUSTERING" << endl;
+        		cout << "------------------------------------------" << endl;
+        		cout << " Reinicios totales gatillados:  " << restart_stats.total_restarts_triggered << endl;
+        		cout << " Clústeres totales formados:    " << restart_stats.total_clusters_formed << endl;
+        		cout << " Hulls finales creados:         " << restart_stats.total_hulls_created << endl;
+        		cout << " Nodos totales unidos en hulls: " << restart_stats.total_nodes_merged << endl;
+        		if (restart_stats.total_restarts_triggered > 0) {
+        		    double avg_clusters = (double)restart_stats.total_clusters_formed / restart_stats.total_restarts_triggered;
+        		    cout << " Promedio de clústeres/reinicio: " << std::fixed << std::setprecision(2) << avg_clusters << endl;
+        		}
+        		if (restart_stats.total_hulls_created > 0) {
+        		    double avg_nodes_per_hull = (double)restart_stats.total_nodes_merged / restart_stats.total_hulls_created;
+        		    cout << " Promedio de nodos/hull:         " << std::fixed << std::setprecision(2) << avg_nodes_per_hull << endl;
+        		}
+        		cout << "------------------------------------------" << endl << endl;
+    		}		
+			//STATS NUEVAS
 		}
 		catch (TimeOutException &)
 		{
@@ -1121,10 +1153,10 @@ namespace ibex
 				 << *statistics << endl;
 	}
 
-
-
+	
     void Optimizer::cluster_restart()
     {
+		restart_stats.total_restarts_triggered++; // <--- CONTADOR DE REINICIOS
         if (trace)
             cout << "[cluster_restart] Iniciando reinicio por clustering ("
                  << (clustering_params.choice == ClusteringParams::Algorithm::DBSCAN ? "DBSCAN" : (clustering_params.choice == ClusteringParams::Algorithm::KMEDOIDS ? "K-Medoids" : "K-Means"))
@@ -1172,6 +1204,8 @@ namespace ibex
             }
         }
 
+		double hull_volume_threshold = clustering_params.hull_volume_threshold_fraction * sum_of_original_volumes;
+
         // **** FIN DEL CÁLCULO DE VOLUMEN PRE-CLUSTERING ****
 
         const int dim = n + 1;
@@ -1184,11 +1218,23 @@ namespace ibex
             const IntervalVector &box = c_ptr->box;
             Point p(dim);
             for (int j = 0; j < dim; ++j)
-            {
-                p[j] = box[j].mid();
-            }
+        		if (clustering_params.use_normalization) {
+        		    if (j == goal_var) {
+        		        p[j] = box[j].mid();
+        		    } else {
+        		        double mid = box[j].mid();
+        		        double lb0 = root_box_norm[j].lb();
+        		        p[j] = (mid - lb0) * inv_range[j]; // CÓDIGO DE NORMALIZACIÓN
+        		    }
+        		}
+        		// Si el interruptor está apagado
+        		else {
+        		    p[j] = box[j].mid(); // CÓDIGO SIN NORMALIZACIÓN (usa el centro directo)
+        		}
             centers.push_back(std::move(p));
         }
+
+
 
         // 3) Ejecutar Clustering 
         std::vector<int> result_labels;
@@ -1208,9 +1254,10 @@ namespace ibex
                 if (N > 0)
                 {
                     eps_to_use_for_dbscan = estimate_dynamic_eps(centers,
-                                                                 clustering_params.minPts,
-                                                                 clustering_params.dynamic_eps_fraction,
-                                                                 clustering_params.dynamic_eps_fallback);
+                                             clustering_params.minPts,
+                                             clustering_params.kneedle_alpha,
+                                             clustering_params.dynamic_eps_fallback);
+
                     if (trace)
                         cout << "[cluster_restart] DBSCAN: Usando eps dinámico estimado = " << eps_to_use_for_dbscan << endl;
                 }
@@ -1320,120 +1367,130 @@ namespace ibex
             }
         }
 
+
+
+		
+		restart_stats.total_clusters_formed += actual_num_clusters;
      // --- PROCESAMIENTO DE CLÚSTERES Y CREACIÓN DE HULLS  ---
-        std::vector<Cell*> noise_cells_to_reinsert; 
-        
-        if (actual_num_clusters > 0 && N > 0)
-        {
-            std::vector<IntervalVector> hulls(actual_num_clusters, IntervalVector(dim)); 
-            std::vector<bool> hull_initialized(actual_num_clusters, false); 
+    	// 1) Agrupamos punteros a celdas por etiqueta de clúster
+    	std::vector<std::vector<Cell*>> clusters_members(actual_num_clusters);
+    	std::vector<Cell*> noise_cells;
+    	for (size_t i = 0; i < N; ++i) {
+    	    Cell* c = active_cells[i];
+    	    int lbl = result_labels[i];
+    	    // Ruido o etiqueta inválida
+    	    if (lbl < 0 || lbl >= actual_num_clusters ||
+    	       (clustering_params.choice == ClusteringParams::Algorithm::DBSCAN &&
+    	        lbl == DBSCAN_NOISE)) {
+    	        noise_cells.push_back(c);
+    	    } else {
+    	        clusters_members[lbl].push_back(c);
+    	    }
+    	}
+    	active_cells.clear();
 
-            for (auto &hv : hulls) 
-            {
-                for (int j = 0; j < dim; ++j)
-                {
-                    hv[j].set_empty();
-                }
-            }
+    	// 2) Para cada clúster, calculamos su hull y decidimos si usarlo
+    	for (int c_id = 0; c_id < actual_num_clusters; ++c_id) {
+    	    auto &members = clusters_members[c_id];
+    	    if (members.empty()) continue;
 
-            // Asignar celdas a hulls o a noise_cells_to_reinsert
-            // y marcar las celdas originales en 'active_cells' como nullptr para indicar que fueron procesadas
-            for (size_t i = 0; i < N; ++i)
-            {
-                if (active_cells[i] == nullptr) continue; // Ya procesada (no debería ocurrir aquí)
+			double sum_cluster_volumes = 0.0;
+			for (Cell* ptr : members) {
+			    sum_cluster_volumes += calculate_box_volume(ptr->box);
+			}
 
-                int lbl = result_labels[i];
+			// Umbral para este clúster (fracción definida en ClusteringParams)
+			double cluster_threshold = clustering_params.hull_volume_threshold_fraction * sum_cluster_volumes;
 
-                if ((clustering_params.choice == ClusteringParams::Algorithm::DBSCAN && lbl == DBSCAN_NOISE) || lbl < 0 || lbl >= actual_num_clusters ) { 
-                    noise_cells_to_reinsert.push_back(active_cells[i]);
-                } else { // Pertenece a un clúster válido lbl
-                    const auto &box_i = active_cells[i]->box;
-                    for (int j = 0; j < dim; ++j)
-                    {
-                        if (!hull_initialized[lbl]) { 
-                            hulls[lbl] = box_i;       
-                            hull_initialized[lbl] = true;
-                        } else if (!box_i[j].is_empty()) { 
-                             if (hulls[lbl][j].is_empty()) { 
-                                hulls[lbl][j] = box_i[j];
-                            } else {
-                                hulls[lbl][j] = hulls[lbl][j] | box_i[j];
-                            }
-                        }
-                    }
-                    delete active_cells[i]; // La celda original se elimina porque contribuyó a un hull
-                }
-                active_cells[i] = nullptr; // Marcar como procesada
-            }
+			if (trace >= 1) {
+			    cout << "[cluster_restart] Clúster " << c_id 
+			         << ": sum_cluster_volumes=" << sum_cluster_volumes 
+			         << ", cluster_threshold=" << cluster_threshold 
+			         << endl;
+			}
 
-            // Repoblar buffer con los hulls generados
-            for (int c = 0; c < actual_num_clusters; ++c)
-            {
-                const auto &hb_const = hulls[c];
-                bool is_hull_genuinely_empty = true; 
-                if (hull_initialized[c]) {
-                    for(int j=0; j<dim; ++j) {
-                        if (!hb_const[j].is_empty()) { is_hull_genuinely_empty = false; break; }
-                    }
-                }
-                if (is_hull_genuinely_empty) {
-                    if (trace >=1) cout << "[cluster_restart] Hull para clúster " << c << " está vacío. Descartando.\n";
-                    continue;
-                }
+    	    // 2a) Construcción del hull envolvente
+    	    IntervalVector hull_box(dim);
+    	    hull_box.set_empty();
+    	    for (Cell* ptr : members) {
+    	        const auto &b = ptr->box;
+    	        if (hull_box.is_empty()) {
+    	            hull_box = b;
+    	        } else {
+    	            for (int j = 0; j < dim; ++j)
+    	                hull_box[j] |= b[j];
+    	        }
+    	    }
 
-                double current_hull_volume = calculate_box_volume(hb_const);
-                // num_hulls_actually_formed se incrementa aquí 
-                num_hulls_actually_formed++;
+    	    // 2b) Cálculo de volumen del hull
+    	    double hull_vol = calculate_box_volume(hull_box);
 
+			if (trace >= 1) {
+    		    cout << "[cluster_restart] Clúster " << c_id
+    		         << ": hull_vol=" << hull_vol
+    		         << ", threshold=" << cluster_threshold
+    		         << endl;
+    		}
 
-                if (trace >= 2) {
-                    cout << "[cluster_restart] Hull formado para clúster " << c 
-                              << ". Volumen: " << current_hull_volume 
-                              << ". Y: " << hb_const[goal_var] << endl;
-                }
+    	    // 2c) Filtro: si supera el umbral, reinsertamos las cajas originales
+    	    if (hull_vol > cluster_threshold) {
+        		// — LOG DE TRACE: volumen excesivo, reinsertando celdas —
+    			if (trace >= 1) {
+    			    cout << "[cluster_restart] Clúster " << c_id
+    			         << ": hull_vol=" << hull_vol
+    			         << " > cluster_threshold=" << cluster_threshold
+    			         << ". Reinsertando " << members.size() << " cajas." << endl;
+    			}
+    	        for (Cell* ptr : members) {
+    	            buffer.add_property(ptr->box, ptr->prop);
+    	            bsc          .add_property(ptr->box, ptr->prop);
+    	            ctc          .add_property(ptr->box, ptr->prop);
+    	            loup_finder  .add_property(ptr->box, ptr->prop);
+    	            buffer.push(ptr);
+    	        }
+    	    }
+    	    // 2d) Si está por debajo, insertamos un único hull y eliminamos las cajas
+    	    else {
+    			if (trace >= 1) {
+    			    cout << "[cluster_restart] Clúster " << c_id
+    			         << ": hull_vol=" << hull_vol
+    			         << " ≤ cluster_threshold=" << cluster_threshold
+    			         << ". Creando hull único." << endl;
+    			}
 
-                // Actualizar suma de volúmenes de hulls
-                if (current_hull_volume == POS_INFINITY) {
-                    any_formed_hull_volume_is_infinite = true;
-                }
-                if (!any_formed_hull_volume_is_infinite) { // Solo sumar si ninguno anterior fue infinito
-                    sum_of_hulls_volume_created += current_hull_volume;
-                } else { // Si alguno ya fue infinito, la suma total es infinita
-                    sum_of_hulls_volume_created = POS_INFINITY;
-                }
+				restart_stats.total_hulls_created++;
+				restart_stats.total_nodes_merged += members.size();
 
+    	        Cell* nc = new Cell(hull_box);
+    	        buffer.add_property(nc->box, nc->prop);
+    	        bsc         .add_property(nc->box, nc->prop);
+    	        ctc         .add_property(nc->box, nc->prop);
+    	        loup_finder .add_property(nc->box, nc->prop);
+    	        buffer.push(nc);
+				num_hulls_actually_formed++;
+				if (hull_vol == POS_INFINITY)
+				    any_formed_hull_volume_is_infinite = true;
+				else
+				    sum_of_hulls_volume_created += hull_vol;
+    	        for (Cell* ptr : members) delete ptr;
+    	    }
+    	    members.clear();
 
-                Cell *nc = new Cell(hb_const); 
-                buffer.add_property(nc->box, nc->prop); 
-                bsc.add_property(nc->box, nc->prop);
-                ctc.add_property(nc->box, nc->prop);
-                loup_finder.add_property(nc->box, nc->prop);
-                buffer.push(nc);
-                if (trace >=1) cout << "[cluster_restart] Push hull para clúster " << c << " [" << nc->box << "]\n";
-            }
-        }
-        else // No se formaron clústeres (actual_num_clusters == 0) pero N > 0
-        {
-            if (trace >=1 && N > 0) {
-                 cout << "[cluster_restart] No se formaron clústeres. Reinsertando " << N << " celdas originales.\n";
-            }
-            // Mover todas las celdas de active_cells a noise_cells_to_reinsert
-            for (Cell *cell_ptr : active_cells) {
-                if (cell_ptr) noise_cells_to_reinsert.push_back(cell_ptr); 
-            }
-        }
-        // Limpiar active_cells, ya que todos sus punteros válidos deberían estar ahora
-        // en noise_cells_to_reinsert o haber sido eliminados.
-        active_cells.clear(); 
-
-        // Reinsertar celdas de ruido (o todas las originales si no hubo clústeres)
-        if (!noise_cells_to_reinsert.empty()) {
-            if (trace >=1) cout << "[cluster_restart] Reinsertando " << noise_cells_to_reinsert.size() << " celdas (ruido/no agrupadas) al buffer.\n";
-            for (Cell* noise_cell : noise_cells_to_reinsert) {
-                if (noise_cell) buffer.push(noise_cell); 
-            }
-        }
-        noise_cells_to_reinsert.clear();
+	}
+    	// 3) Reinsertamos todas las celdas clasificadas como “ruido”
+		if (trace >= 1 && !noise_cells.empty()) {
+        cout << "[cluster_restart] Reinsertando ruido: "
+             << noise_cells.size()
+             << " celdas." << endl;
+    	}
+    	for (Cell* ptr : noise_cells) {
+    	    buffer.add_property(ptr->box, ptr->prop);
+    	    bsc         .add_property(ptr->box, ptr->prop);
+    	    ctc         .add_property(ptr->box, ptr->prop);
+    	    loup_finder .add_property(ptr->box, ptr->prop);
+    	    buffer.push(ptr);
+    	}
+    	noise_cells.clear();
 
         // ---- Log de la SUMA de volúmenes de hulls POST-CLUSTERING ----
         if (trace >= 1) {
@@ -1456,5 +1513,5 @@ namespace ibex
             cout << "[cluster_restart] Completado. Buffer ahora tiene " << buffer.size() << " celdas.\n";
         }
     } // Fin de Optimizer::cluster_restart
-    
+
 } // end namespace ibex

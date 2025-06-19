@@ -17,27 +17,47 @@
 //---------------------------------------------------------------------------
 // Parámetros para reinicios basados en clustering
 struct ClusteringParams {
-    enum class Algorithm { KMEANS, DBSCAN, KMEDOIDS }; // Nuevo enum para elegir
+    enum class Algorithm { KMEANS, DBSCAN, KMEDOIDS, MEANSHIFT }; // Nuevo enum para elegir
     Algorithm choice = Algorithm::KMEANS;   // Algoritmo por defecto
 
+	// KMEANS
     int   k      = 5;     // número de clusters por defecto (k-means)
 
-    double eps   = 0.1;   // radio para DBSCAN (VALOR DE EJEMPLO, AJUSTAR!)
+	// DBSCAN
+	double eps   = 0.1;   // radio para DBSCAN (VALOR DE EJEMPLO, AJUSTAR!)
     int   minPts = 5;     // tamaño mínimo de cluster para DBSCAN (VALOR DE EJEMPLO, AJUSTAR!)
-
-	// NUEVO: Para controlar el eps dinámico
-    bool  use_dynamic_eps = false; // Poner a true para activar el cálculo dinámico
-    double dynamic_eps_fraction = 0.25; // Fracción de la distancia promedio a usar (ajustable)
+	//dinamic
+    bool  use_dynamic_eps = true; // Poner a true para activar el cálculo dinámico
     double dynamic_eps_fallback = 0.1; // Eps por defecto si hay muy pocos puntos para estimar
 
+	double kneedle_alpha = 0.5;   /** Factor α para suavizar la ε detectada (0<α≤1) */
+
+	// KMEDOIDS
 	int kmedoids_max_iters = 50;
 	
-	double max_hull_ydiam_factor = 0.5; // Ejemplo de valor por defecto, AJÚSTALO
-    double max_hull_ydiam_increase_factor = 2.0; // Ejemplo de valor por defecto, AJÚSTALO
+	double hull_volume_threshold_fraction = 3.0;
 
+	bool use_normalization = true; // <--- AÑADE ESTA LÍNEA
 
+	
 };
 //---------------------------------------------------------------------------
+//estadisticas
+struct RestartStats {
+    int total_restarts_triggered = 0;
+    int total_clusters_formed = 0;
+    int total_hulls_created = 0;
+    int total_nodes_merged = 0;
+
+    void reset() {
+        total_restarts_triggered = 0;
+        total_clusters_formed = 0;
+        total_hulls_created = 0;
+        total_nodes_merged = 0;
+    }
+};
+//fin estadisticas
+
 
 namespace ibex {
 
@@ -441,6 +461,7 @@ private:
     int stagnation_counter = 0;       ///< contador de iteraciones estancadas
 	int node_threshold = 10000;       ///< numero de nodos antes de reiniciar
     ClusteringParams clustering_params;///< parámetros de clustering
+	RestartStats restart_stats; 
     void cluster_restart();           ///< prototipo de la rutina de reinicio
 
 
@@ -555,4 +576,4 @@ inline const CovOptimData& Optimizer::get_data() const {
 
 } // end namespace ibex
 
-#endif // __IBEX_OPTIMIZER_H__
+#endif // __IBEX_OPTIMIZER_H
