@@ -491,7 +491,7 @@ namespace ibex
 		node_threshold = 50000;
 		stagnation_counter = 0;
 
-		clustering_params.hull_volume_threshold_fraction = 3; // 10 para tener maximo de 10 veces mas la caja inicial
+		clustering_params.hull_volume_threshold_fraction = 3.0; // 10 para tener maximo de 10 veces mas la caja inicial
 
 
 		// KMEANS
@@ -508,7 +508,7 @@ namespace ibex
 
 		// eps dinamico
 		clustering_params.use_dynamic_eps = true;	  // 
-		clustering_params.kneedle_alpha = 0.1; // Suavizado de Kneedle (0 < α ≤ 1)
+		clustering_params.kneedle_alpha = 0.5; // Suavizado de Kneedle (0 < α ≤ 1)
 
 		if (enable_statistics)
 		{
