@@ -42,7 +42,7 @@ Para compilar el proyecto, es necesario tener la biblioteca Ibex instalada. Una 
 3.  **Compilar Ibex:**
     Siga las instrucciones de compilación de la biblioteca Ibex, un ejemplo de ejecución abajo.
     ```
-        ./ibexopt [ibex-lib-path]/benchs/optim/medium/ex2_1_7.bch 
+    ./ibexopt [ibex-lib-path]/benchs/optim/medium/ex2_1_7.bch 
     ```
     
 
