@@ -40,7 +40,12 @@ Para compilar el proyecto, es necesario tener la biblioteca Ibex instalada. Una 
     Copie los ficheros de `src/optim/` a la carpeta `src/optim/` de su instalación de Ibex.
 
 3.  **Compilar Ibex:**
-    Siga las instrucciones de compilación de la biblioteca Ibex.
+    Siga las instrucciones de compilación de la biblioteca Ibex, un ejemplo de ejecución abajo.
+    ```
+        ./ibexopt [ibex-lib-path]/benchs/optim/medium/ex2_1_7.bch 
+    ```
+    
+
 
 ## Uso
 
